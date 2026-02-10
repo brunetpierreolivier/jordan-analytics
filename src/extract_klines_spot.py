@@ -25,6 +25,38 @@ def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int, limit: 
     r.raise_for_status()
     return r.json()
 
+def fetch_klines_paginated(symbol: str, interval: str, start_ms: int, end_ms: int, limit: int = 1000):
+    """
+    Récupère toutes les bougies entre start_ms et end_ms en plusieurs appels (pagination),
+    car Binance limite la réponse à 1000 klines max par requête.
+    """
+    all_klines = []
+    current_start = start_ms
+
+    while True:
+        chunk = fetch_klines(symbol, interval, current_start, end_ms, limit=limit)
+        if not chunk:
+            break
+
+        all_klines.extend(chunk)
+
+        # On avance : la dernière bougie retournée donne son open_time_ms en position 0
+        last_open_time_ms = chunk[-1][0]
+
+        # Si on n'a pas rempli le 'limit', c'est qu'on est arrivé au bout
+        if len(chunk) < limit:
+            break
+
+        # Sinon on repart juste après la dernière bougie pour éviter les doublons
+        current_start = last_open_time_ms + 1
+
+        # Sécurité anti-boucle infinie (au cas où l'API renverrait toujours la même chose)
+        if current_start >= end_ms:
+            break
+
+    return all_klines
+
+
 def klines_to_df(klines_json, symbol: str):
     """
     Convertit la réponse JSON klines en DataFrame structuré.
@@ -63,17 +95,24 @@ def main():
     os.makedirs(OUT_DIR_PROCESSED, exist_ok=True)
 
     start_ms, end_ms = compute_time_range_utc()
-    symbol = SYMBOLS[0]  # test sur la 1ère paire uniquement
 
-    print(f"[INFO] Fetch klines for {symbol} interval={INTERVAL} limit={KLINES_LIMIT}")
-    klines_json = fetch_klines(symbol, INTERVAL, start_ms, end_ms, limit=KLINES_LIMIT)
+    all_dfs = []
+    for symbol in SYMBOLS:
+        print(f"[INFO] Fetch klines for {symbol} interval={INTERVAL} limit={KLINES_LIMIT}")
+        klines_json = fetch_klines_paginated(symbol, INTERVAL, start_ms, end_ms, limit=KLINES_LIMIT)
 
-    df = klines_to_df(klines_json, symbol)
-    out_path = os.path.join(OUT_DIR_PROCESSED, "fact_klines_1h_sample.csv")
-    df.to_csv(out_path, index=False)
+        df_symbol = klines_to_df(klines_json, symbol)
+        all_dfs.append(df_symbol)
 
-    print(f"[OK] Saved sample CSV: {out_path}")
-    print(df.head(3))
+        print(f"[OK] {symbol}: {len(df_symbol)} rows")
+
+    df_all = pd.concat(all_dfs, ignore_index=True)
+
+    out_path = os.path.join(OUT_DIR_PROCESSED, "fact_klines_1h.csv")
+    df_all.to_csv(out_path, index=False)
+
+    print(f"[OK] Saved full CSV: {out_path}")
+    print(df_all.head(3))
 
 if __name__ == "__main__":
     main()

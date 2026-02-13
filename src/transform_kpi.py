@@ -154,6 +154,70 @@ def build_data_quality_hourly(df_fact: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(rows).sort_values("symbol").reset_index(drop=True)
 
+def zscore(series: pd.Series) -> pd.Series:
+    """
+    Z-score = (x - moyenne) / écart-type
+    Sert à repérer les valeurs "très éloignées" de la normale.
+    """
+    mean = series.mean(skipna=True)
+    std = series.std(skipna=True)
+    if std == 0 or pd.isna(std):
+        return pd.Series([0] * len(series), index=series.index)
+    return (series - mean) / std
+
+def build_anomaly_events_daily(agg_daily: pd.DataFrame, z_thresh: float = 3.0) -> pd.DataFrame:
+    """
+    Crée une table d'événements d'anomalies à partir des données journalières.
+    - Anomalie return : |zscore(return_1d)| >= z_thresh
+    - Anomalie volume : zscore(value_traded) >= z_thresh
+    """
+    df = agg_daily.copy()
+    df = df.sort_values(["symbol", "date"])
+
+    events = []
+
+    for symbol, g in df.groupby("symbol"):
+        g = g.copy()
+
+        # Z-scores par symbol (comparaison "à soi-même")
+        g["z_return"] = zscore(g["return_1d"].fillna(0))
+        g["z_value_traded"] = zscore(g["value_traded"].fillna(0))
+
+        # Return anomalies (absolu)
+        mask_ret = g["z_return"].abs() >= z_thresh
+        for _, row in g.loc[mask_ret].iterrows():
+            events.append({
+                "date": row["date"],
+                "symbol": symbol,
+                "anomaly_type": "RETURN_SPIKE",
+                "score": round(float(abs(row["z_return"])), 3),
+                "metric": "return_1d",
+                "metric_value": float(row["return_1d"]) if pd.notna(row["return_1d"]) else None
+            })
+
+        # Volume anomalies (positif)
+        mask_vol = g["z_value_traded"] >= z_thresh
+        for _, row in g.loc[mask_vol].iterrows():
+            events.append({
+                "date": row["date"],
+                "symbol": symbol,
+                "anomaly_type": "VOLUME_SPIKE",
+                "score": round(float(row["z_value_traded"]), 3),
+                "metric": "value_traded",
+                "metric_value": float(row["value_traded"]) if pd.notna(row["value_traded"]) else None
+            })
+
+    events_df = pd.DataFrame(events)
+    if events_df.empty:
+        # Toujours retourner un DataFrame avec les colonnes attendues
+        events_df = pd.DataFrame(columns=["date", "symbol", "anomaly_type", "score", "metric", "metric_value"])
+    else:
+        events_df["date"] = pd.to_datetime(events_df["date"])
+        events_df = events_df.sort_values(["date", "symbol", "anomaly_type"]).reset_index(drop=True)
+
+    return events_df
+
+
 def main():
     os.makedirs(OUT_DIR_PROCESSED, exist_ok=True)
 
@@ -170,6 +234,14 @@ def main():
     data_quality = build_data_quality_hourly(df_fact)
     out_path_quality = os.path.join(OUT_DIR_PROCESSED, "data_quality.csv")
     data_quality.to_csv(out_path_quality, index=False)
+    
+    anomaly_events = build_anomaly_events_daily(agg_daily, z_thresh=3.0)
+    out_path_anom = os.path.join(OUT_DIR_PROCESSED, "anomaly_events.csv")
+    anomaly_events.to_csv(out_path_anom, index=False)
+
+    print(f"[OK] Saved: {out_path_anom}")
+    print(anomaly_events.head(10))
+
 
     print(f"[OK] Saved: {out_path_quality}")
     print(data_quality)
